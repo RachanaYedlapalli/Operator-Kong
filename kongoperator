@@ -1,0 +1,65 @@
+from kubernetes import client, config, watch
+from kong import Kong
+import requests
+
+k8s_client = client.ApiClient()
+kong_admin_url = "http://localhost:8001"
+kong = Kong(kong_admin_url)
+
+def get_istio_target_endpoint(namespace, deployment_name):
+    # Get Istio VirtualService for the deployment
+    vs_list = VirtualService.objects(namespace=namespace).filter(selector={"app": deployment_name})
+    if not vs_list:
+        print("No VirtualService found for deployment:", deployment_name)
+        return None
+    
+    # Assume there is only one VirtualService
+    vs = vs_list[0]
+    return vs.obj["spec"]["http"][0]["route"][0]["destination"]["host"]
+
+def configure_kong_public_endpoint(public_endpoint, target_endpoint):
+    service_name = public_endpoint.replace(".", "-")
+    upstream_url = f"http://{target_endpoint}"
+
+    # Add upstream
+    kong.upstreams.create(name=service_name, slots=10000)
+
+    # Add target to upstream
+    kong.targets.create(upstream_name=service_name, target=upstream_url)
+
+    # Add service
+    kong.services.create(name=service_name, url=upstream_url)
+
+    # Add route
+    kong.routes.create(service_name=service_name, paths=[f"/{public_endpoint}"])
+
+def handle_deployment_event(event):
+    deployment = event['object']
+    deployment_name = deployment.metadata.name
+    namespace = deployment.metadata.namespace
+
+    print(f"Received event for deployment: {deployment_name} in namespace: {namespace}")
+
+    # Retrieve target endpoint from Istio
+    target_endpoint = get_istio_target_endpoint(namespace, deployment_name)
+    if target_endpoint:
+        print(f"Target endpoint for deployment {deployment_name}: {target_endpoint}")
+
+        # Configure public endpoint in Kong
+        public_endpoint = "your-public-endpoint.com"  # Replace with your public endpoint
+        configure_kong_public_endpoint(public_endpoint, target_endpoint)
+    else:
+        print("Failed to retrieve target endpoint")
+
+def main():
+    # Load Kubernetes configuration
+    config.load_kube_config()
+
+    # Watch for deployment events
+    v1 = client.AppsV1Api(k8s_client)
+    w = watch.Watch()
+    for event in w.stream(v1.list_deployment_for_all_namespaces):
+        handle_deployment_event(event)
+
+if __name__ == "__main__":
+    main()
